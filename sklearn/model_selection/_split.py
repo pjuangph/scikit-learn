@@ -21,6 +21,9 @@ from abc import ABCMeta, abstractmethod
 from inspect import signature
 
 import numpy as np
+import pandas as pd
+from copy import deepcopy
+from typing import List
 from scipy.special import comb
 
 from ..utils import indexable, check_random_state, _safe_indexing
@@ -2506,3 +2509,100 @@ def _yields_constant_splits(cv):
     shuffle = getattr(cv, "shuffle", True)
     random_state = getattr(cv, "random_state", 0)
     return isinstance(random_state, numbers.Integral) or not shuffle
+
+def divide_and_conquer(dataset:pd.DataFrame,label_column_name:str,nLabelsPerGroup:int, nOverlap:int,num_non_matching:int=-1) -> List[pd.DataFrame]:
+    """Code to divide labels into a list of labels for smaller models. For example, we take a large dataset containing 16 labels and break it down into a smaller dataset that that predicts 5 labels; 3 labels are unique to the model and 1 label overlaps with another model and the other remaining label (-1) is the "I don't know what label this paper is"
+    
+    Parameters
+    ----------
+    dataset : pd.DataFrame
+        This is your training or test dataset that you want to split and divide out between the models
+    
+    label_column_name : str
+        Column name from dataset where label_ids are stored. Label_id is an integer corresponding to a value in `labels`
+    
+    labels  : Dict[str,int]
+        list of unique labels and their id
+    
+    nLabelsPerGroup : int
+        number of labels per group 
+    
+    nOverlap : int
+        Number of overlaping labels. Defaults to > 5
+    
+    num_non_matching : int
+        Number of non-matching labels to include in each divided dataset.
+
+    Yields
+    ------    
+    labels_overlap : List[List[str]] 
+        List of labels with overlap
+
+    L_matches(List[pd.DataFrame]): List of new dataframes with smaller number of labels
+    """
+    assert nLabelsPerGroup+1-nOverlap>2, "Need to have 2+ unique labels per group."
+
+    unique_labels = dataset[label_column_name].unique().tolist()
+
+    '''
+        Lets create a new column in the pandas dataset and assign the label ID. 
+    '''    
+    # if you want 1 overlap and 3 labels per group then we want [1,2,5] [5,9,12] [12,13,1]
+
+    # Create the list of labels without overlap 
+    labels = list()
+    while True:
+        label = list()
+        for u in unique_labels:
+            if u not in labels and len(label) < nLabelsPerGroup-nOverlap:
+                skip = False
+                for lu in labels:
+                    if u in lu:
+                        skip = True    
+                if not skip:
+                    label.append(u)
+            elif len(label) >= nLabelsPerGroup-nOverlap:
+                break
+        if not label:
+            break
+        labels.append(label)
+    # Lets add the overlap
+    labels_overlap = list() 
+    unique_labels_used = list()
+    for i in range(len(labels)):
+        labels_overlap.append(deepcopy(labels[i]))
+        overlap_counter = 0
+        for u in unique_labels:
+            if u not in labels[i] and u not in unique_labels_used:
+                labels_overlap[-1].append(u)
+                unique_labels_used.append(u)
+                overlap_counter+=1
+            if overlap_counter==nOverlap:
+                break
+    unused_unique_labels = [u for u in unique_labels if u not in unique_labels_used]
+    labels_overlap.append(unused_unique_labels)
+
+    # Restructure the dataset
+    L_matches = list() # List of all the matches 
+    dfs = list()
+    translators = list()
+    translators_to_str = list()
+    for lo in labels_overlap:
+        translators.append(dict(zip(lo, range(len(lo)))))
+        # translators_to_str.append(dict(zip(range(len(lo)), itemgetter(*lo)(unique_labels))))
+        df_temp = dataset[dataset[label_column_name].isin(lo)]
+        L_matches.append(df_temp)
+
+    # Go through dataframe and add in labels that are no applicable (n/a), change label to n/a
+    if num_non_matching != 0:
+        for i in range(len(L_matches)):            
+            local_unique_labels = L_matches[i][label_column_name].unique().tolist()
+            indices_to_drop = dataset[dataset[label_column_name].isin(local_unique_labels)].index
+            ds = dataset.drop(indices_to_drop)
+            
+            if num_non_matching > 0:
+                ds = ds.sample(num_non_matching)
+            ds[label_column_name] = 'n/a'
+            L_matches[i] = pd.concat([L_matches[i],ds])
+        
+    return labels_overlap, L_matches 
